@@ -1,0 +1,76 @@
+from fastapi import WebSocket, WebSocketDisconnect, APIRouter
+from services.comment_stream import CommentStreamService
+from services.eaos_analyzer import EAOSAnalyzerService
+from typing import List
+import json
+import asyncio
+from pathlib import Path
+
+router = APIRouter()
+
+# Global instances
+comment_service = None
+analyzer = EAOSAnalyzerService()
+active_connections: List[WebSocket] = []
+
+
+def init_services(data_path: str):
+    """Initialize services with data path"""
+    global comment_service
+    comment_service = CommentStreamService(data_path)
+
+
+@router.websocket("/ws/comments")
+async def websocket_comments(websocket: WebSocket):
+    """WebSocket endpoint for streaming comments"""
+    await websocket.accept()
+    active_connections.append(websocket)
+
+    try:
+        # Stream comments to this client
+        async for comment in comment_service.stream_comments(interval=2.0):
+            # Add to analyzer
+            analyzer.add_comment(comment)
+
+            # Send to client
+            await websocket.send_json({
+                "type": "comment",
+                "data": comment.model_dump(mode='json')
+            })
+
+    except WebSocketDisconnect:
+        active_connections.remove(websocket)
+        print("Client disconnected")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        active_connections.remove(websocket)
+
+
+@router.websocket("/ws/analytics")
+async def websocket_analytics(websocket: WebSocket):
+    """WebSocket endpoint for streaming analytics updates"""
+    await websocket.accept()
+
+    try:
+        while True:
+            # Send analytics summary every 5 seconds
+            summary = analyzer.get_analytics_summary()
+            await websocket.send_json({
+                "type": "analytics",
+                "data": summary.model_dump(mode='json')
+            })
+            await asyncio.sleep(5)
+
+    except WebSocketDisconnect:
+        print("Analytics client disconnected")
+    except Exception as e:
+        print(f"Analytics WebSocket error: {e}")
+
+
+async def broadcast_message(message: dict):
+    """Broadcast message to all connected clients"""
+    for connection in active_connections:
+        try:
+            await connection.send_json(message)
+        except:
+            pass

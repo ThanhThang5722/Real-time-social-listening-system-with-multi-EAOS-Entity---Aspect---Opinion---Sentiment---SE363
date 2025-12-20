@@ -1,0 +1,91 @@
+# ========================================
+# TV Producer Analytics - Python Dependencies
+# ========================================
+
+# ----------------------------------------
+# Core Framework
+# ----------------------------------------
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# ----------------------------------------
+# Google Cloud Platform
+# ----------------------------------------
+google-cloud-pubsub==2.19.0
+google-cloud-aiplatform==1.38.1
+google-cloud-bigquery==3.14.1
+google-auth==2.25.2
+google-auth-oauthlib==1.2.0
+
+# ----------------------------------------
+# AI/ML Framework
+# ----------------------------------------
+# LangChain ecosystem
+langchain==0.1.0
+langchain-google-vertexai==0.0.4
+langchain-community==0.0.13
+langgraph==0.0.20
+
+# LangFuse for observability
+langfuse==2.6.3
+
+# ----------------------------------------
+# Database Clients
+# ----------------------------------------
+# Redis
+redis==5.0.1
+hiredis==2.3.2
+
+# ClickHouse
+clickhouse-connect==0.6.23
+
+# Elasticsearch
+elasticsearch==8.11.0
+
+# ----------------------------------------
+# Data Processing
+# ----------------------------------------
+pandas==2.1.4
+numpy==1.26.2
+scipy==1.11.4
+
+# ----------------------------------------
+# Async & Concurrency
+# ----------------------------------------
+asyncio==3.4.3
+aiohttp==3.9.1
+aiofiles==23.2.1
+
+# ----------------------------------------
+# Monitoring & Logging
+# ----------------------------------------
+structlog==23.3.0
+python-json-logger==2.0.7
+
+# ----------------------------------------
+# Utilities
+# ----------------------------------------
+httpx==0.26.0
+websockets==12.0
+tenacity==8.2.3  # Retry logic
+cachetools==5.3.2  # Caching utilities
+
+# ----------------------------------------
+# Testing (optional, for development)
+# ----------------------------------------
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+httpx==0.26.0  # For testing FastAPI
+faker==21.0.0  # Generate fake data
+
+# ----------------------------------------
+# Development Tools (optional)
+# ----------------------------------------
+black==23.12.1  # Code formatter
+ruff==0.1.9  # Linter
+mypy==1.7.1  # Type checker
+ipython==8.19.0  # Interactive shell
