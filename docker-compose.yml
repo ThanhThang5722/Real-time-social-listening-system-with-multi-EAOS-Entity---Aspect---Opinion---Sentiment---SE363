@@ -1,0 +1,147 @@
+version: '3.8'
+
+services:
+  # Redis - Real-time cache for EAOS scores and hot trends
+  redis:
+    image: redis:7-alpine
+    container_name: tv-analytics-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - tv-analytics
+
+  # ClickHouse - Time-series database for analytics
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8-alpine
+    container_name: tv-analytics-clickhouse
+    ports:
+      - "8123:8123"  # HTTP interface
+      - "9000:9000"  # Native client
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./scripts/clickhouse-init:/docker-entrypoint-initdb.d
+    environment:
+      CLICKHOUSE_DB: tv_analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - tv-analytics
+
+  # Elasticsearch - Full-text search for comments
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: tv-analytics-elasticsearch
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - cluster.name=tv-analytics-cluster
+      - node.name=tv-analytics-node
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - tv-analytics
+
+  # LangFuse - LLM observability (optional, can use cloud version)
+  langfuse-server:
+    image: langfuse/langfuse:latest
+    container_name: tv-analytics-langfuse
+    ports:
+      - "3000:3000"
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      # PostgreSQL for metadata (users, projects, etc.)
+      DATABASE_URL: postgresql://langfuse:langfuse123@langfuse-db:5432/langfuse
+
+      # ClickHouse for traces/observations (high performance time-series)
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-tv_analytics}
+
+      # LangFuse settings
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${LANGFUSE_SECRET:-your-secret-key-change-this-in-production}
+      SALT: ${LANGFUSE_SALT:-your-salt-change-this-in-production}
+      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-true}
+
+      # Enable ClickHouse for traces
+      LANGFUSE_USE_CLICKHOUSE: ${LANGFUSE_USE_CLICKHOUSE:-true}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/public/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - tv-analytics
+
+  # PostgreSQL for LangFuse
+  langfuse-db:
+    image: postgres:15-alpine
+    container_name: tv-analytics-langfuse-db
+    ports:
+      - "5432:5432"
+    volumes:
+      - langfuse_db_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse123
+      POSTGRES_DB: langfuse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - tv-analytics
+
+volumes:
+  redis_data:
+    driver: local
+  clickhouse_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+  langfuse_db_data:
+    driver: local
+
+networks:
+  tv-analytics:
+    driver: bridge
