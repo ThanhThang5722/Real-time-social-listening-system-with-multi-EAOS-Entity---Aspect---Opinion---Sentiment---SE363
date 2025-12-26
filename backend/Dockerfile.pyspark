@@ -1,0 +1,36 @@
+# ============================================================================
+# Lightweight PySpark Service with HTTP API
+# ============================================================================
+
+FROM python:3.11-slim
+
+# Install Java (required for PySpark)
+RUN apt-get update && apt-get install -y \
+    openjdk-21-jre-headless \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Java home
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+ENV PYTHONPATH=/app
+
+WORKDIR /app
+
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Upgrade PyArrow for PySpark compatibility
+RUN pip install --no-cache-dir --upgrade "pyarrow>=15.0.0"
+
+# Install Flask for HTTP API
+RUN pip install --no-cache-dir flask flask-cors
+
+# Copy application code
+COPY . .
+
+# Expose port for HTTP API
+EXPOSE 5001
+
+# Run Flask server
+CMD ["python", "ml/spark_service.py"]

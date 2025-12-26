@@ -52,7 +52,7 @@ SENTIMENT_MAP = {
 
 class MultiEAOSModel(nn.Module):
     """
-    Multi-EAOS Model: PhoBERT + BiLSTM + Attention
+    Multi-EAOS Model: PhoBERT + Transformer + Attention
 
     Predicts multiple EAOS quadruples:
     - Entity (start, end)
@@ -72,52 +72,59 @@ class MultiEAOSModel(nn.Module):
     ):
         super(MultiEAOSModel, self).__init__()
 
-        # PhoBERT Encoder
+        # 1. BERT Encoder (PhoBERT)
         self.bert = AutoModel.from_pretrained(model_name)
-        self.bert_hidden_size = self.bert.config.hidden_size
+        self.bert_hidden_size = self.bert.config.hidden_size  # 768
 
-        # BiLSTM Layer
-        self.lstm = nn.LSTM(
-            input_size=self.bert_hidden_size,
-            hidden_size=hidden_dim,
-            num_layers=1,
-            batch_first=True,
-            bidirectional=True
+        # 2. Transformer Encoder Layer (replaces BiLSTM)
+        self.transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=self.bert_hidden_size,
+                nhead=4,
+                dim_feedforward=hidden_dim,
+            ),
+            num_layers=2
         )
-        self.lstm_out_dim = hidden_dim * 2
 
-        # Learnable Queries for multi-quad prediction
-        self.quad_queries = nn.Parameter(torch.randn(max_quads, self.lstm_out_dim))
+        # 3. Learnable Queries for multi-quad prediction
+        self.quad_queries = nn.Parameter(torch.randn(max_quads, self.bert_hidden_size))
 
-        # Multi-Head Attention
+        # 4. Multi-Head Attention
         self.attention = nn.MultiheadAttention(
-            embed_dim=self.lstm_out_dim,
+            embed_dim=self.bert_hidden_size,
             num_heads=4,
             batch_first=True
         )
 
-        # Prediction Heads
-        self.fc_e_start = nn.Linear(self.lstm_out_dim, max_len)
-        self.fc_e_end = nn.Linear(self.lstm_out_dim, max_len)
-        self.fc_o_start = nn.Linear(self.lstm_out_dim, max_len)
-        self.fc_o_end = nn.Linear(self.lstm_out_dim, max_len)
-        self.fc_aspect = nn.Linear(self.lstm_out_dim, num_aspects)
-        self.fc_sentiment = nn.Linear(self.lstm_out_dim, num_sentiments)
-
-        self.dropout = nn.Dropout(0.1)
+        # 5. Prediction Heads (6 outputs per quad)
+        self.fc_e_start = nn.Linear(self.bert_hidden_size, max_len)
+        self.fc_e_end = nn.Linear(self.bert_hidden_size, max_len)
+        self.fc_o_start = nn.Linear(self.bert_hidden_size, max_len)
+        self.fc_o_end = nn.Linear(self.bert_hidden_size, max_len)
+        self.fc_aspect = nn.Linear(self.bert_hidden_size, num_aspects)
+        self.fc_sentiment = nn.Linear(self.bert_hidden_size, num_sentiments)
 
     def forward(self, input_ids, attention_mask):
-        # Encoding
+        # --- A. Encoding Phase ---
         bert_out = self.bert(input_ids=input_ids, attention_mask=attention_mask)[0]
-        lstm_out, _ = self.lstm(bert_out)
 
-        # Multi-EAOS Decoding
+        # --- B. Transformer Encoder ---
+        transformer_out = self.transformer(bert_out)
+
+        # --- C. Multi-EAOS Decoding Phase ---
         batch_size = input_ids.size(0)
-        queries = self.quad_queries.unsqueeze(0).expand(batch_size, -1, -1)
-        attn_out, _ = self.attention(query=queries, key=lstm_out, value=lstm_out)
-        attn_out = self.dropout(attn_out)
 
-        # Predictions
+        # Expand queries for batch
+        queries = self.quad_queries.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Attention: queries extract quad information
+        attn_out, _ = self.attention(
+            query=queries,
+            key=transformer_out,
+            value=transformer_out
+        )
+
+        # --- D. Prediction Phase ---
         return {
             "e_start": self.fc_e_start(attn_out),
             "e_end": self.fc_e_end(attn_out),
@@ -140,7 +147,7 @@ def load_model(
     Load trained model from directory
 
     Args:
-        model_dir: Directory containing model.pth and config.json
+        model_dir: Directory containing latest_checkpoint.pth and config.json
         device: torch device (auto-detected if None)
 
     Returns:
@@ -151,11 +158,14 @@ def load_model(
 
     # Load config
     config_path = os.path.join(model_dir, "config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config not found: {config_path}")
+
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
 
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
+    tokenizer = AutoTokenizer.from_pretrained(config['model_name'], use_fast=True)
 
     # Create model
     model = MultiEAOSModel(
@@ -167,14 +177,27 @@ def load_model(
         hidden_dim=config['hidden_dim']
     ).to(device)
 
-    # Load weights
-    model_path = os.path.join(model_dir, "model.pth")
-    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    # Load weights from checkpoint
+    checkpoint_path = os.path.join(model_dir, "latest_checkpoint.pth")
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # Extract model state dict from checkpoint
+    if 'model_state_dict' in checkpoint:
+        model_state_dict = checkpoint['model_state_dict']
+    else:
+        model_state_dict = checkpoint
+
+    # Load weights (strict=False to ignore missing keys)
+    model.load_state_dict(model_state_dict, strict=False)
     model.eval()
 
     print(f"✅ Model loaded from {model_dir}")
     print(f"   Device: {device}")
     print(f"   Epoch: {config.get('best_epoch', 'N/A')}")
+    print(f"   Checkpoint: latest_checkpoint.pth")
 
     return model, tokenizer, config
 

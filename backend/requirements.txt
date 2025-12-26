@@ -14,9 +14,9 @@ motor==3.3.2
 pymongo==4.6.1
 
 # Spark & Big Data
-pyspark==3.5.0
+pyspark
 pyarrow==14.0.1
-pandas==2.1.4
+pandas
 
 # Deep Learning
 torch==2.1.2
@@ -26,5 +26,5 @@ protobuf==4.25.1
 
 # ML Utilities
 scikit-learn==1.3.2
-numpy==1.26.2
+numpy
 tqdm==4.66.1

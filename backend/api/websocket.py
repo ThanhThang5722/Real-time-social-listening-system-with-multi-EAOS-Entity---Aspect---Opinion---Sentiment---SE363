@@ -1,7 +1,7 @@
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter
 from services.comment_stream import CommentStreamService
 from services.eaos_analyzer import EAOSAnalyzerService
-from services.eaos_model_service import EAOSModelService
+from services.pyspark_client import get_pyspark_client
 from typing import List
 import json
 import asyncio
@@ -12,45 +12,57 @@ router = APIRouter()
 # Global instances
 comment_service = None
 analyzer = EAOSAnalyzerService()
-model_service = None
+pyspark_client = None
 active_connections: List[WebSocket] = []
 
 
 def init_services(data_path: str):
-    """Initialize services with data path"""
-    global comment_service, model_service
+    """
+    Initialize services with data path
+
+    Connects to PySpark service for predictions instead of loading model directly
+    """
+    global comment_service, pyspark_client
     comment_service = CommentStreamService(data_path)
 
-    # Initialize EAOS model service
+    # Initialize PySpark client
     try:
-        model_service = EAOSModelService()
-        print("✅ EAOS Model Service initialized successfully")
+        pyspark_client = get_pyspark_client()
+        if pyspark_client:
+            print("✅ Connected to PySpark service for predictions")
+        else:
+            print("⚠️  Warning: PySpark service not available")
+            print("   Comments will be streamed without EAOS predictions")
     except Exception as e:
-        print(f"⚠️  Warning: Failed to load EAOS model: {e}")
+        print(f"⚠️  Warning: Failed to connect to PySpark service: {e}")
         print("   Comments will be streamed without EAOS predictions")
-        model_service = None
+        pyspark_client = None
 
 
 @router.websocket("/ws/comments")
 async def websocket_comments(websocket: WebSocket):
-    """WebSocket endpoint for streaming comments with EAOS predictions"""
+    """
+    WebSocket endpoint for streaming comments with EAOS predictions
+
+    Flow: Backend → PySpark Service (HTTP) → Model → Predictions
+    """
     await websocket.accept()
     active_connections.append(websocket)
 
     try:
         # Stream comments to this client
         async for comment in comment_service.stream_comments(interval=2.0):
-            # Predict EAOS labels if model is available
-            if model_service is not None:
+            # Predict EAOS labels via PySpark service
+            if pyspark_client is not None:
                 try:
-                    # Predict labels from comment text
-                    predicted_labels = model_service.predict(
+                    # Call PySpark service for prediction
+                    predicted_labels = pyspark_client.predict(
                         comment.text,
                         confidence_threshold=0.3
                     )
                     comment.labels = predicted_labels
                 except Exception as e:
-                    print(f"Prediction error: {e}")
+                    print(f"Prediction error (PySpark service): {e}")
                     comment.labels = []
 
             # Add to analyzer
