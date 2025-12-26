@@ -78,50 +78,30 @@ services:
     networks:
       - tv-analytics
 
-  # Spark Master - Distributed ML inference
-  spark-master:
-    image: apache/spark:3.5.0
-    container_name: tv-analytics-spark-master
+  # PySpark Service - HTTP API for PySpark inference
+  pyspark:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.pyspark
+    container_name: tv-analytics-pyspark
     ports:
-      - "7077:7077"   # Spark Master
-      - "8090:8080"   # Spark Master Web UI (changed from 8080 to avoid conflict)
+      - "5001:5001"   # HTTP API
+      - "4040:4040"   # Spark UI (when job runs)
     environment:
-      - SPARK_MODE=master
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
-      - SPARK_MASTER_WEBUI_PORT=8080
+      - PYTHONPATH=/app
+      - MODEL_DIR=/app/models/checkpoints
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    restart: unless-stopped
+    networks:
+      - tv-analytics
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    networks:
-      - tv-analytics
-
-  # Spark Worker - ML model execution
-  spark-worker:
-    image: apache/spark:3.5.0
-    container_name: tv-analytics-spark-worker
-    depends_on:
-      - spark-master
-    ports:
-      - "8091:8081"   # Spark Worker Web UI
-    environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=4G
-      - SPARK_WORKER_CORES=2
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
-      - SPARK_WORKER_WEBUI_PORT=8081
-    restart: unless-stopped
-    networks:
-      - tv-analytics
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 volumes:
   redis_data:

@@ -39,17 +39,11 @@ langfuse==2.6.3
 redis==5.0.1
 hiredis==2.3.2
 
-# ClickHouse
-clickhouse-connect==0.6.23
-
-# Elasticsearch
-elasticsearch==8.11.0
-
 # ----------------------------------------
 # Data Processing
 # ----------------------------------------
-pandas==2.1.4
-numpy==1.26.2
+pandas
+numpy
 scipy==1.11.4
 
 # ----------------------------------------
@@ -93,3 +87,6 @@ ipython==8.19.0  # Interactive shell
 torch
 transformers
 tensorflow
+pyspark
+
+httpx

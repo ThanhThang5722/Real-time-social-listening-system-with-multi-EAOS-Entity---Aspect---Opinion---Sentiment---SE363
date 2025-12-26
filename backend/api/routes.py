@@ -8,7 +8,7 @@ from models.schemas import (
     PredictResponse
 )
 from services.eaos_analyzer import EAOSAnalyzerService
-from services.eaos_model_service import EAOSModelService
+from services.pyspark_client import get_pyspark_client
 from datetime import datetime
 from typing import List
 import random
@@ -17,18 +17,26 @@ router = APIRouter()
 
 # Global instances (in production, use dependency injection)
 analyzer = EAOSAnalyzerService()
-model_service = None
+pyspark_client = None
 
 
-def init_model_service():
-    """Initialize model service"""
-    global model_service
-    if model_service is None:
+def init_pyspark_client():
+    """
+    Initialize PySpark client
+
+    This connects to PySpark service (port 5001) which uses:
+    - EAOS Model for inference
+    - PandasUDF for batch processing
+    """
+    global pyspark_client
+    if pyspark_client is None:
         try:
-            model_service = EAOSModelService()
+            pyspark_client = get_pyspark_client()
+            if pyspark_client:
+                print("✅ Connected to PySpark service")
         except Exception as e:
-            print(f"⚠️  Failed to initialize model service: {e}")
-            model_service = None
+            print(f"⚠️  Failed to connect to PySpark service: {e}")
+            pyspark_client = None
 
 
 @router.get("/")
@@ -146,26 +154,29 @@ async def search_comments(q: str, limit: int = 20):
 @router.post("/predict", response_model=PredictResponse)
 async def predict_single_comment(request: PredictRequest):
     """
-    Predict EAOS labels for a single comment
+    Predict EAOS labels for a single comment via PySpark service
+
+    Flow: Backend (FastAPI) → PySpark Service (HTTP) → Model Inference
 
     Args:
         request: PredictRequest with text and optional confidence_threshold
 
     Returns:
-        PredictResponse with predicted labels
+        PredictResponse with predicted labels from PySpark service
     """
-    # Initialize model if not already done
-    if model_service is None:
-        init_model_service()
+    # Initialize PySpark client if not already done
+    if pyspark_client is None:
+        init_pyspark_client()
 
-    if model_service is None:
+    if pyspark_client is None:
         raise HTTPException(
             status_code=503,
-            detail="EAOS model service is not available. Please check server logs."
+            detail="PySpark service is not available. Please start PySpark service (port 5001)."
         )
 
     try:
-        labels = model_service.predict(
+        # Call PySpark service via HTTP
+        labels = pyspark_client.predict(
             request.text,
             confidence_threshold=request.confidence_threshold
         )
@@ -186,31 +197,35 @@ async def predict_single_comment(request: PredictRequest):
 @router.post("/predict/batch")
 async def predict_batch_comments(request: PredictBatchRequest):
     """
-    Predict EAOS labels for multiple comments
+    Predict EAOS labels for multiple comments via PySpark service
+
+    Flow: Backend (FastAPI) → PySpark Service (HTTP) → PandasUDF (batch >= 10) or Model (batch < 10)
 
     Args:
         request: PredictBatchRequest with list of texts
 
     Returns:
-        List of PredictResponse objects
+        List of PredictResponse objects with predictions from PySpark
     """
-    # Initialize model if not already done
-    if model_service is None:
-        init_model_service()
+    # Initialize PySpark client if not already done
+    if pyspark_client is None:
+        init_pyspark_client()
 
-    if model_service is None:
+    if pyspark_client is None:
         raise HTTPException(
             status_code=503,
-            detail="EAOS model service is not available. Please check server logs."
+            detail="PySpark service is not available. Please start PySpark service (port 5001)."
         )
 
     try:
+        # Call PySpark service via HTTP (uses PandasUDF for batch >= 10)
+        batch_labels = pyspark_client.predict_batch(
+            request.texts,
+            confidence_threshold=request.confidence_threshold
+        )
+
         results = []
-        for text in request.texts:
-            labels = model_service.predict(
-                text,
-                confidence_threshold=request.confidence_threshold
-            )
+        for text, labels in zip(request.texts, batch_labels):
             results.append({
                 "text": text,
                 "labels": labels,

@@ -115,20 +115,20 @@ def run_spark_job(
     print("EAOS Spark Inference Job")
     print("=" * 70)
 
-    # Create Spark session
+    # Create Spark session (local mode - like Colab)
     spark = SparkSession.builder \
         .appName("EAOS-Inference") \
-        .master("spark://localhost:7077") \
-        .config("spark.executor.memory", "4g") \
-        .config("spark.driver.memory", "2g") \
+        .master("local[*]") \
+        .config("spark.driver.memory", "4g") \
         .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
         .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
 
-    print(f"✅ Spark session created")
-    print(f"   Master: spark://localhost:7077")
+    print(f"✅ Spark session created (local mode)")
+    print(f"   Master: local[*] (uses all CPU cores)")
     print(f"   App ID: {spark.sparkContext.applicationId}")
+    print(f"   Spark UI: http://localhost:4040")
 
     # Create UDF
     print(f"\n🔧 Creating PandasUDF with model: {model_dir}")
