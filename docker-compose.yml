@@ -1,45 +1,20 @@
-version: '3.8'
+#version: '3.8'
 
 services:
-  # Redis - Real-time cache for EAOS scores and hot trends
-  redis:
-    image: redis:7-alpine
-    container_name: tv-analytics-redis
+  # Zookeeper - Kafka coordination
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: tv-analytics-zookeeper
     ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    restart: unless-stopped
-    networks:
-      - tv-analytics
-
-  # ClickHouse - Time-series database for analytics
-  clickhouse:
-    image: clickhouse/clickhouse-server:23.8-alpine
-    container_name: tv-analytics-clickhouse
-    ports:
-      - "8123:8123"  # HTTP interface
-      - "9000:9000"  # Native client
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./scripts/clickhouse-init:/docker-entrypoint-initdb.d
+      - "2181:2181"
     environment:
-      CLICKHOUSE_DB: tv_analytics
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -47,87 +22,103 @@ services:
     networks:
       - tv-analytics
 
-  # Elasticsearch - Full-text search for comments
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
-    container_name: tv-analytics-elasticsearch
-    ports:
-      - "9200:9200"
-      - "9300:9300"
-    volumes:
-      - elasticsearch_data:/usr/share/elasticsearch/data
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - xpack.security.enrollment.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-      - cluster.name=tv-analytics-cluster
-      - node.name=tv-analytics-node
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: unless-stopped
-    networks:
-      - tv-analytics
-
-  # LangFuse - LLM observability (optional, can use cloud version)
-  langfuse-server:
-    image: langfuse/langfuse:latest
-    container_name: tv-analytics-langfuse
-    ports:
-      - "3000:3000"
+  # Kafka - Message broker for real-time data streaming
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: tv-analytics-kafka
     depends_on:
-      langfuse-db:
+      zookeeper:
         condition: service_healthy
-      clickhouse:
-        condition: service_healthy
+    ports:
+      - "9092:9092"   # External access
+      - "9093:9093"   # Internal access
     environment:
-      # PostgreSQL for metadata (users, projects, etc.)
-      DATABASE_URL: postgresql://langfuse:langfuse123@langfuse-db:5432/langfuse
-
-      # ClickHouse for traces/observations (high performance time-series)
-      CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
-      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-tv_analytics}
-
-      # LangFuse settings
-      NEXTAUTH_URL: http://localhost:3000
-      NEXTAUTH_SECRET: ${LANGFUSE_SECRET:-your-secret-key-change-this-in-production}
-      SALT: ${LANGFUSE_SALT:-your-salt-change-this-in-production}
-      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
-      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-true}
-
-      # Enable ClickHouse for traces
-      LANGFUSE_USE_CLICKHOUSE: ${LANGFUSE_USE_CLICKHOUSE:-true}
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9093,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    volumes:
+      - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/public/health"]
-      interval: 30s
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
       timeout: 10s
-      retries: 3
+      retries: 5
     restart: unless-stopped
     networks:
       - tv-analytics
 
-  # PostgreSQL for LangFuse
-  langfuse-db:
-    image: postgres:15-alpine
-    container_name: tv-analytics-langfuse-db
+  # MongoDB - Storage for training data from Kafka
+  mongodb:
+    image: mongo:7.0
+    container_name: tv-analytics-mongodb
     ports:
-      - "5432:5432"
-    volumes:
-      - langfuse_db_data:/var/lib/postgresql/data
+      - "27017:27017"
     environment:
-      POSTGRES_USER: langfuse
-      POSTGRES_PASSWORD: langfuse123
-      POSTGRES_DB: langfuse
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-admin123}
+      MONGO_INITDB_DATABASE: tv_analytics
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+    networks:
+      - tv-analytics
+
+  # Spark Master - Distributed ML inference
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: tv-analytics-spark-master
+    ports:
+      - "7077:7077"   # Spark Master
+      - "8090:8080"   # Spark Master Web UI (changed from 8080 to avoid conflict)
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_MASTER_WEBUI_PORT=8080
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - tv-analytics
+
+  # Spark Worker - ML model execution
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: tv-analytics-spark-worker
+    depends_on:
+      - spark-master
+    ports:
+      - "8091:8081"   # Spark Worker Web UI
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=4G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_WORKER_WEBUI_PORT=8081
     restart: unless-stopped
     networks:
       - tv-analytics
@@ -135,11 +126,15 @@ services:
 volumes:
   redis_data:
     driver: local
-  clickhouse_data:
+  zookeeper_data:
     driver: local
-  elasticsearch_data:
+  zookeeper_logs:
     driver: local
-  langfuse_db_data:
+  kafka_data:
+    driver: local
+  mongodb_data:
+    driver: local
+  mongodb_config:
     driver: local
 
 networks:

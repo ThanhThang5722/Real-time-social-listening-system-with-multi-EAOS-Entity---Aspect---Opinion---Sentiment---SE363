@@ -1,6 +1,7 @@
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter
 from services.comment_stream import CommentStreamService
 from services.eaos_analyzer import EAOSAnalyzerService
+from services.eaos_model_service import EAOSModelService
 from typing import List
 import json
 import asyncio
@@ -11,24 +12,47 @@ router = APIRouter()
 # Global instances
 comment_service = None
 analyzer = EAOSAnalyzerService()
+model_service = None
 active_connections: List[WebSocket] = []
 
 
 def init_services(data_path: str):
     """Initialize services with data path"""
-    global comment_service
+    global comment_service, model_service
     comment_service = CommentStreamService(data_path)
+
+    # Initialize EAOS model service
+    try:
+        model_service = EAOSModelService()
+        print("✅ EAOS Model Service initialized successfully")
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to load EAOS model: {e}")
+        print("   Comments will be streamed without EAOS predictions")
+        model_service = None
 
 
 @router.websocket("/ws/comments")
 async def websocket_comments(websocket: WebSocket):
-    """WebSocket endpoint for streaming comments"""
+    """WebSocket endpoint for streaming comments with EAOS predictions"""
     await websocket.accept()
     active_connections.append(websocket)
 
     try:
         # Stream comments to this client
         async for comment in comment_service.stream_comments(interval=2.0):
+            # Predict EAOS labels if model is available
+            if model_service is not None:
+                try:
+                    # Predict labels from comment text
+                    predicted_labels = model_service.predict(
+                        comment.text,
+                        confidence_threshold=0.3
+                    )
+                    comment.labels = predicted_labels
+                except Exception as e:
+                    print(f"Prediction error: {e}")
+                    comment.labels = []
+
             # Add to analyzer
             analyzer.add_comment(comment)
 

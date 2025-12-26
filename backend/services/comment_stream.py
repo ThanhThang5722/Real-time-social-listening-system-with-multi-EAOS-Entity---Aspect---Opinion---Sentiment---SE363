@@ -28,7 +28,7 @@ class CommentStreamService:
             self.comments = []
 
     async def get_next_comment(self) -> Comment:
-        """Get next comment from the dataset (循环)"""
+        """Get next comment from the dataset - returns only text, no labels"""
         if not self.comments:
             # Return a mock comment if no data
             return self._generate_mock_comment()
@@ -36,10 +36,8 @@ class CommentStreamService:
         comment_data = self.comments[self.current_index]
         self.current_index = (self.current_index + 1) % len(self.comments)
 
-        # Convert to Comment model
-        labels = [
-            EAOSLabel(**label) for label in comment_data.get('labels', [])
-        ]
+        # Return comment with empty labels (will be filled by model prediction)
+        labels = []
 
         # Generate mock username
         usernames = ["user123", "viewer456", "fan789", "livestream_watcher", "comment_user"]
@@ -47,7 +45,7 @@ class CommentStreamService:
         return Comment(
             id=f"comment_{self.current_index}_{datetime.now().timestamp()}",
             text=comment_data['text'],
-            labels=labels,
+            labels=labels,  # Empty - to be filled by model
             timestamp=datetime.now(),
             username=random.choice(usernames)
         )
