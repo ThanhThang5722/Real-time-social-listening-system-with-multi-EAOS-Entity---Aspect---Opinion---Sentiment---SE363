@@ -89,3 +89,7 @@ black==23.12.1  # Code formatter
 ruff==0.1.9  # Linter
 mypy==1.7.1  # Type checker
 ipython==8.19.0  # Interactive shell
+
+torch
+transformers
+tensorflow

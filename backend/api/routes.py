@@ -1,13 +1,34 @@
 from fastapi import APIRouter, HTTPException
-from models.schemas import ChatRequest, ChatMessage, AnalyticsSummary
+from models.schemas import (
+    ChatRequest,
+    ChatMessage,
+    AnalyticsSummary,
+    PredictRequest,
+    PredictBatchRequest,
+    PredictResponse
+)
 from services.eaos_analyzer import EAOSAnalyzerService
+from services.eaos_model_service import EAOSModelService
 from datetime import datetime
+from typing import List
 import random
 
 router = APIRouter()
 
-# Global analyzer instance (in production, use dependency injection)
+# Global instances (in production, use dependency injection)
 analyzer = EAOSAnalyzerService()
+model_service = None
+
+
+def init_model_service():
+    """Initialize model service"""
+    global model_service
+    if model_service is None:
+        try:
+            model_service = EAOSModelService()
+        except Exception as e:
+            print(f"⚠️  Failed to initialize model service: {e}")
+            model_service = None
 
 
 @router.get("/")
@@ -120,3 +141,89 @@ async def search_comments(q: str, limit: int = 20):
         "count": len(results),
         "results": results[:limit]
     }
+
+
+@router.post("/predict", response_model=PredictResponse)
+async def predict_single_comment(request: PredictRequest):
+    """
+    Predict EAOS labels for a single comment
+
+    Args:
+        request: PredictRequest with text and optional confidence_threshold
+
+    Returns:
+        PredictResponse with predicted labels
+    """
+    # Initialize model if not already done
+    if model_service is None:
+        init_model_service()
+
+    if model_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="EAOS model service is not available. Please check server logs."
+        )
+
+    try:
+        labels = model_service.predict(
+            request.text,
+            confidence_threshold=request.confidence_threshold
+        )
+
+        return PredictResponse(
+            text=request.text,
+            labels=labels,
+            count=len(labels)
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Prediction failed: {str(e)}"
+        )
+
+
+@router.post("/predict/batch")
+async def predict_batch_comments(request: PredictBatchRequest):
+    """
+    Predict EAOS labels for multiple comments
+
+    Args:
+        request: PredictBatchRequest with list of texts
+
+    Returns:
+        List of PredictResponse objects
+    """
+    # Initialize model if not already done
+    if model_service is None:
+        init_model_service()
+
+    if model_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="EAOS model service is not available. Please check server logs."
+        )
+
+    try:
+        results = []
+        for text in request.texts:
+            labels = model_service.predict(
+                text,
+                confidence_threshold=request.confidence_threshold
+            )
+            results.append({
+                "text": text,
+                "labels": labels,
+                "count": len(labels)
+            })
+
+        return {
+            "total": len(results),
+            "results": results
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Batch prediction failed: {str(e)}"
+        )

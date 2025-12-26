@@ -46,3 +46,22 @@ class AnalyticsSummary(BaseModel):
     top_entities: List[dict]  # [{"entity": "chương trình", "count": 50}, ...]
     top_aspects: List[dict]
     recent_comments: List[Comment]
+
+
+class PredictRequest(BaseModel):
+    """Request for single comment prediction"""
+    text: str
+    confidence_threshold: Optional[float] = 0.3
+
+
+class PredictBatchRequest(BaseModel):
+    """Request for batch comment prediction"""
+    texts: List[str]
+    confidence_threshold: Optional[float] = 0.3
+
+
+class PredictResponse(BaseModel):
+    """Response for prediction"""
+    text: str
+    labels: List[EAOSLabel]
+    count: int
