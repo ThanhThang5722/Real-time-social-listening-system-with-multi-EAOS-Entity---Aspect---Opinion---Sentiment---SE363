@@ -1,18 +1,19 @@
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter
 from services.comment_stream import CommentStreamService
 from services.eaos_analyzer import EAOSAnalyzerService
-from services.pyspark_client import get_pyspark_client
+from pymongo import MongoClient
 from typing import List
 import json
 import asyncio
 from pathlib import Path
+from datetime import datetime
 
 router = APIRouter()
 
 # Global instances
 comment_service = None
 analyzer = EAOSAnalyzerService()
-pyspark_client = None
+mongo_client = None
 active_connections: List[WebSocket] = []
 
 
@@ -20,31 +21,33 @@ def init_services(data_path: str):
     """
     Initialize services with data path
 
-    Connects to PySpark service for predictions instead of loading model directly
+    Saves comments to MongoDB for batch processing by Airflow
     """
-    global comment_service, pyspark_client
+    global comment_service, mongo_client
     comment_service = CommentStreamService(data_path)
 
-    # Initialize PySpark client
+    # Initialize MongoDB client
+    # Use environment variable or default to localhost (for local development)
+    import os
+    mongo_host = os.getenv('MONGO_HOST', 'localhost')
+    mongo_url = f'mongodb://admin:admin123@{mongo_host}:27017/'
+
     try:
-        pyspark_client = get_pyspark_client()
-        if pyspark_client:
-            print("✅ Connected to PySpark service for predictions")
-        else:
-            print("⚠️  Warning: PySpark service not available")
-            print("   Comments will be streamed without EAOS predictions")
+        mongo_client = MongoClient(mongo_url)
+        # Test connection
+        mongo_client.server_info()
+        print(f"✅ Connected to MongoDB at {mongo_host}:27017")
     except Exception as e:
-        print(f"⚠️  Warning: Failed to connect to PySpark service: {e}")
-        print("   Comments will be streamed without EAOS predictions")
-        pyspark_client = None
+        print(f"⚠️  Warning: Failed to connect to MongoDB at {mongo_host}:27017: {e}")
+        mongo_client = None
 
 
 @router.websocket("/ws/comments")
 async def websocket_comments(websocket: WebSocket):
     """
-    WebSocket endpoint for streaming comments with EAOS predictions
+    WebSocket endpoint for streaming comments
 
-    Flow: Backend → PySpark Service (HTTP) → Model → Predictions
+    Flow: Backend → MongoDB (unlabeled) → Wait for Airflow batch processing
     """
     await websocket.accept()
     active_connections.append(websocket)
@@ -52,18 +55,26 @@ async def websocket_comments(websocket: WebSocket):
     try:
         # Stream comments to this client
         async for comment in comment_service.stream_comments(interval=2.0):
-            # Predict EAOS labels via PySpark service
-            if pyspark_client is not None:
+            # Save to MongoDB WITHOUT labels (to be processed by Airflow)
+            if mongo_client is not None:
                 try:
-                    # Call PySpark service for prediction
-                    predicted_labels = pyspark_client.predict(
-                        comment.text,
-                        confidence_threshold=0.3
-                    )
-                    comment.labels = predicted_labels
+                    db = mongo_client['tv_analytics']
+                    collection = db['comments']
+
+                    collection.insert_one({
+                        'text': comment.text,
+                        'source': 'websocket',
+                        'created_at': datetime.now(),
+                        'labels': []  # Empty - will be filled by Airflow batch processing
+                    })
+
+                    print(f"💾 Saved to MongoDB: {comment.text[:50]}...")
+
                 except Exception as e:
-                    print(f"Prediction error (PySpark service): {e}")
-                    comment.labels = []
+                    print(f"MongoDB save error: {e}")
+
+            # Send to client WITHOUT predictions
+            comment.labels = []  # No predictions - must wait for batch processing
 
             # Add to analyzer
             analyzer.add_comment(comment)
@@ -71,7 +82,8 @@ async def websocket_comments(websocket: WebSocket):
             # Send to client
             await websocket.send_json({
                 "type": "comment",
-                "data": comment.model_dump(mode='json')
+                "data": comment.model_dump(mode='json'),
+                "message": "Saved to MongoDB. Will be processed in next batch (every 15 min)."
             })
 
     except WebSocketDisconnect:
