@@ -50,10 +50,11 @@ def initialize_spark():
     spark = SparkSession.builder \
         .appName("EAOS-Service") \
         .master("local[*]") \
-        .config("spark.driver.memory", "4g") \
+        .config("spark.driver.memory", "2g") \
         .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
-        .config("spark.driver.bindAddress", "0.0.0.0") \
-        .config("spark.driver.host", "0.0.0.0") \
+        .config("spark.driver.host", "localhost") \
+        .config("spark.driver.bindAddress", "localhost") \
+        .config("spark.ui.enabled", "false") \
         .getOrCreate()
 
     print("✅ PySpark initialized")
@@ -225,7 +226,12 @@ def predict_batch():
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback
+        error_msg = str(e)
+        error_trace = traceback.format_exc()
+        print(f"❌ ERROR in /predict/batch: {error_msg}")
+        print(f"Traceback:\n{error_trace}")
+        return jsonify({"error": error_msg, "traceback": error_trace}), 500
 
 @app.route('/predict/file', methods=['POST'])
 def predict_file():

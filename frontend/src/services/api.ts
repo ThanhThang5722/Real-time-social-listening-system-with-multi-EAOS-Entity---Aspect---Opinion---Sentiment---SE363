@@ -35,4 +35,16 @@ export class ApiService {
   static connectAnalyticsStream(): WebSocket {
     return new WebSocket(`${WS_BASE_URL}/ws/analytics`);
   }
+
+  static async getLabeledComments(limit = 100, skip = 0) {
+    const response = await fetch(`${API_BASE_URL}/comments/labeled?limit=${limit}&skip=${skip}`);
+    if (!response.ok) throw new Error('Failed to fetch labeled comments');
+    return response.json();
+  }
+
+  static async getCommentById(commentId: string) {
+    const response = await fetch(`${API_BASE_URL}/comments/${commentId}`);
+    if (!response.ok) throw new Error('Failed to fetch comment');
+    return response.json();
+  }
 }

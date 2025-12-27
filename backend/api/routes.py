@@ -8,7 +8,7 @@ from models.schemas import (
     PredictResponse
 )
 from services.eaos_analyzer import EAOSAnalyzerService
-from services.pyspark_client import get_pyspark_client
+from pymongo import MongoClient
 from datetime import datetime
 from typing import List
 import random
@@ -17,26 +17,20 @@ router = APIRouter()
 
 # Global instances (in production, use dependency injection)
 analyzer = EAOSAnalyzerService()
-pyspark_client = None
+mongo_client = None
 
 
-def init_pyspark_client():
-    """
-    Initialize PySpark client
-
-    This connects to PySpark service (port 5001) which uses:
-    - EAOS Model for inference
-    - PandasUDF for batch processing
-    """
-    global pyspark_client
-    if pyspark_client is None:
-        try:
-            pyspark_client = get_pyspark_client()
-            if pyspark_client:
-                print("✅ Connected to PySpark service")
-        except Exception as e:
-            print(f"⚠️  Failed to connect to PySpark service: {e}")
-            pyspark_client = None
+def get_mongo_client():
+    """Get MongoDB client"""
+    global mongo_client
+    if mongo_client is None:
+        import os
+        # Use environment variable or default to localhost (for local development)
+        mongo_host = os.getenv('MONGO_HOST', 'localhost')
+        mongo_url = f'mongodb://admin:admin123@{mongo_host}:27017/'
+        mongo_client = MongoClient(mongo_url)
+        print(f"✅ Connected to MongoDB at {mongo_host}:27017")
+    return mongo_client
 
 
 @router.get("/")
@@ -151,94 +145,174 @@ async def search_comments(q: str, limit: int = 20):
     }
 
 
-@router.post("/predict", response_model=PredictResponse)
-async def predict_single_comment(request: PredictRequest):
+@router.post("/submit", response_model=dict)
+async def submit_comment(request: PredictRequest):
     """
-    Predict EAOS labels for a single comment via PySpark service
+    Submit comment to MongoDB for batch processing
 
-    Flow: Backend (FastAPI) → PySpark Service (HTTP) → Model Inference
+    Flow: Backend → MongoDB (unlabeled) → Wait for Airflow → Airflow → PySpark → MongoDB (labeled)
 
     Args:
-        request: PredictRequest with text and optional confidence_threshold
+        request: PredictRequest with text
 
     Returns:
-        PredictResponse with predicted labels from PySpark service
+        Confirmation with comment ID
     """
-    # Initialize PySpark client if not already done
-    if pyspark_client is None:
-        init_pyspark_client()
-
-    if pyspark_client is None:
-        raise HTTPException(
-            status_code=503,
-            detail="PySpark service is not available. Please start PySpark service (port 5001)."
-        )
-
     try:
-        # Call PySpark service via HTTP
-        labels = pyspark_client.predict(
-            request.text,
-            confidence_threshold=request.confidence_threshold
-        )
+        # Save to MongoDB without labels (to be processed by Airflow)
+        client = get_mongo_client()
+        db = client['tv_analytics']
+        collection = db['comments']
 
-        return PredictResponse(
-            text=request.text,
-            labels=labels,
-            count=len(labels)
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Prediction failed: {str(e)}"
-        )
-
-
-@router.post("/predict/batch")
-async def predict_batch_comments(request: PredictBatchRequest):
-    """
-    Predict EAOS labels for multiple comments via PySpark service
-
-    Flow: Backend (FastAPI) → PySpark Service (HTTP) → PandasUDF (batch >= 10) or Model (batch < 10)
-
-    Args:
-        request: PredictBatchRequest with list of texts
-
-    Returns:
-        List of PredictResponse objects with predictions from PySpark
-    """
-    # Initialize PySpark client if not already done
-    if pyspark_client is None:
-        init_pyspark_client()
-
-    if pyspark_client is None:
-        raise HTTPException(
-            status_code=503,
-            detail="PySpark service is not available. Please start PySpark service (port 5001)."
-        )
-
-    try:
-        # Call PySpark service via HTTP (uses PandasUDF for batch >= 10)
-        batch_labels = pyspark_client.predict_batch(
-            request.texts,
-            confidence_threshold=request.confidence_threshold
-        )
-
-        results = []
-        for text, labels in zip(request.texts, batch_labels):
-            results.append({
-                "text": text,
-                "labels": labels,
-                "count": len(labels)
-            })
+        result = collection.insert_one({
+            'text': request.text,
+            'source': 'api',
+            'created_at': datetime.now(),
+            'labels': []  # Empty - will be filled by Airflow batch processing
+        })
 
         return {
-            "total": len(results),
-            "results": results
+            "status": "submitted",
+            "comment_id": str(result.inserted_id),
+            "message": "Comment saved to MongoDB. Will be processed in next batch (every 15 min).",
+            "text": request.text
         }
 
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Batch prediction failed: {str(e)}"
+            detail=f"Failed to submit comment: {str(e)}"
+        )
+
+
+@router.post("/submit/batch")
+async def submit_batch_comments(request: PredictBatchRequest):
+    """
+    Submit multiple comments to MongoDB for batch processing
+
+    Flow: Backend → MongoDB (unlabeled) → Wait for Airflow → Airflow → PySpark → MongoDB (labeled)
+
+    Args:
+        request: PredictBatchRequest with list of texts
+
+    Returns:
+        Confirmation with count and IDs
+    """
+    try:
+        # Save all to MongoDB without labels
+        client = get_mongo_client()
+        db = client['tv_analytics']
+        collection = db['comments']
+
+        documents = [
+            {
+                'text': text,
+                'source': 'api_batch',
+                'created_at': datetime.now(),
+                'labels': []  # Empty - will be filled by Airflow
+            }
+            for text in request.texts
+        ]
+
+        result = collection.insert_many(documents)
+
+        return {
+            "status": "submitted",
+            "count": len(result.inserted_ids),
+            "comment_ids": [str(id) for id in result.inserted_ids],
+            "message": f"Saved {len(result.inserted_ids)} comments to MongoDB. Will be processed in next batch (every 15 min)."
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to submit batch: {str(e)}"
+        )
+
+
+@router.get("/comments/labeled")
+async def get_labeled_comments(limit: int = 100, skip: int = 0):
+    """
+    Get labeled comments from MongoDB (after Airflow batch processing)
+
+    Returns comments that have been processed by Airflow with Entity, Aspect, Opinion, Sentiment predictions
+
+    Query params:
+        limit: Maximum number of comments to return (default: 100)
+        skip: Number of comments to skip (for pagination)
+    """
+    try:
+        client = get_mongo_client()
+        db = client['tv_analytics']
+        collection = db['comments']
+
+        # Query ONLY labeled comments (processed by Airflow)
+        labeled_comments = list(collection.find(
+            {'labels': {'$exists': True, '$ne': []}},
+            {'_id': 1, 'text': 1, 'labels': 1, 'predicted_at': 1, 'created_at': 1, 'source': 1}
+        ).sort('predicted_at', -1).skip(skip).limit(limit))
+
+        # Convert ObjectId to string and format dates
+        for comment in labeled_comments:
+            comment['_id'] = str(comment['_id'])
+            comment['created_at'] = comment['created_at'].isoformat() if comment.get('created_at') else None
+            comment['predicted_at'] = comment['predicted_at'].isoformat() if comment.get('predicted_at') else None
+
+        return {
+            "total": len(labeled_comments),
+            "comments": labeled_comments
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get labeled comments: {str(e)}"
+        )
+
+
+@router.get("/comments/{comment_id}")
+async def get_comment_by_id(comment_id: str):
+    """
+    Get a specific comment by ID to check if predictions are ready
+
+    Frontend can poll this endpoint after submitting to check when predictions are available
+
+    Args:
+        comment_id: MongoDB ObjectId of the comment
+
+    Returns:
+        Comment with predictions (if processed) and status
+    """
+    from bson import ObjectId
+
+    try:
+        client = get_mongo_client()
+        db = client['tv_analytics']
+        collection = db['comments']
+
+        comment = collection.find_one({'_id': ObjectId(comment_id)})
+
+        if not comment:
+            raise HTTPException(status_code=404, detail="Comment not found")
+
+        # Convert ObjectId to string and format dates
+        comment['_id'] = str(comment['_id'])
+        comment['created_at'] = comment['created_at'].isoformat() if comment.get('created_at') else None
+        if comment.get('predicted_at'):
+            comment['predicted_at'] = comment['predicted_at'].isoformat()
+
+        # Check if labeled
+        is_labeled = bool(comment.get('labels') and len(comment['labels']) > 0)
+
+        return {
+            "comment": comment,
+            "is_labeled": is_labeled,
+            "status": "labeled" if is_labeled else "pending",
+            "message": "Predictions ready!" if is_labeled else "Waiting for batch processing (runs every 1 min)"
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=400 if "ObjectId" in str(e) else 500,
+            detail=str(e)
         )
