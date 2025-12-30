@@ -113,6 +113,33 @@ def health():
         "model": inference is not None
     })
 
+@app.route('/reload', methods=['POST'])
+def reload_model():
+    """
+    Reload model from checkpoint
+
+    This allows updating the model weights without restarting the service.
+    Call this endpoint after updating the checkpoint file.
+    """
+    try:
+        print("\n" + "=" * 60)
+        print("🔄 Reloading model from checkpoint...")
+        print("=" * 60)
+
+        initialize_model()
+
+        return jsonify({
+            "status": "success",
+            "message": "Model reloaded successfully",
+            "model_dir": MODEL_DIR
+        })
+    except Exception as e:
+        print(f"❌ Failed to reload model: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Failed to reload model: {str(e)}"
+        }), 500
+
 @app.route('/predict', methods=['POST'])
 def predict_single():
     """

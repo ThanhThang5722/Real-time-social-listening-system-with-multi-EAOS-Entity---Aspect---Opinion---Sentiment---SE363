@@ -58,11 +58,46 @@ export default function CommentStream() {
     // Initial fetch of labeled comments
     fetchLabeledComments();
 
-    // Poll for labeled comments every 30 seconds
-    const pollInterval = setInterval(fetchLabeledComments, 30000);
+    // Poll for labeled comments every 10 seconds (fallback)
+    const pollInterval = setInterval(fetchLabeledComments, 10000);
+
+    // Connect to WebSocket for real-time notifications
+    let ws: WebSocket | null = null;
+
+    try {
+      ws = ApiService.connectAnalyticsStream();
+
+      ws.onopen = () => {
+        console.log('✅ WebSocket connected for real-time notifications');
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        // Listen for new predictions notification
+        if (data.type === 'new_predictions') {
+          console.log('🔔 New predictions available:', data.count);
+          // Immediately fetch new predictions
+          fetchLabeledComments();
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket disconnected');
+      };
+    } catch (error) {
+      console.error('Failed to connect WebSocket:', error);
+    }
 
     return () => {
       clearInterval(pollInterval);
+      if (ws) {
+        ws.close();
+      }
     };
   }, []);
 
@@ -75,9 +110,9 @@ export default function CommentStream() {
         </h2>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
+            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
             <span className="text-xs text-gray-600">
-              Auto-refresh every 30s
+              Real-time + Polling (10s)
             </span>
           </div>
           <button

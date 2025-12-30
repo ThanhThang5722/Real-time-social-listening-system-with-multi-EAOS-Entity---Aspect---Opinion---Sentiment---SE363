@@ -5,19 +5,24 @@ from models.schemas import (
     AnalyticsSummary,
     PredictRequest,
     PredictBatchRequest,
-    PredictResponse
+    PredictResponse,
+    NotifyRequest
 )
 from services.eaos_analyzer import EAOSAnalyzerService
 from pymongo import MongoClient
 from datetime import datetime
 from typing import List
 import random
+import asyncio
 
 router = APIRouter()
 
 # Global instances (in production, use dependency injection)
 analyzer = EAOSAnalyzerService()
 mongo_client = None
+
+# WebSocket connections manager (shared with websocket.py)
+websocket_connections = []
 
 
 def get_mongo_client():
@@ -316,3 +321,70 @@ async def get_comment_by_id(comment_id: str):
             status_code=400 if "ObjectId" in str(e) else 500,
             detail=str(e)
         )
+
+
+@router.post("/notify/predictions")
+async def notify_new_predictions(request: NotifyRequest):
+    """
+    Notify WebSocket clients about new predictions
+
+    Called by Airflow after saving predictions to MongoDB.
+    Broadcasts a notification to all connected WebSocket clients.
+
+    Args:
+        comment_ids: Optional list of comment IDs that were just predicted
+
+    Returns:
+        Status of broadcast
+    """
+    try:
+        # Import here to avoid circular dependency
+        from api.websocket import broadcast_message, get_active_connections
+
+        # Get recently labeled comments
+        client = get_mongo_client()
+        db = client['tv_analytics']
+        collection = db['comments']
+
+        # Query for recent predictions
+        recent_comments = list(collection.find(
+            {'labels': {'$exists': True, '$ne': []}},
+            {'_id': 1, 'text': 1, 'labels': 1, 'predicted_at': 1}
+        ).sort('predicted_at', -1).limit(10))
+
+        # Format for JSON
+        for comment in recent_comments:
+            comment['_id'] = str(comment['_id'])
+            if comment.get('predicted_at'):
+                comment['predicted_at'] = comment['predicted_at'].isoformat()
+
+        # Broadcast to WebSocket clients
+        comment_ids = request.comment_ids if request.comment_ids else []
+        notification = {
+            'type': 'new_predictions',
+            'count': len(comment_ids) if comment_ids else len(recent_comments),
+            'message': f'{len(comment_ids) if comment_ids else len(recent_comments)} new predictions available',
+            'recent_comments': recent_comments[:3],  # Send first 3 as preview
+            'timestamp': datetime.now().isoformat()
+        }
+
+        # Broadcast to all connected clients
+        await broadcast_message(notification)
+
+        connections_count = len(get_active_connections())
+        print(f"✅ Broadcasted notification to {connections_count} WebSocket clients")
+
+        return {
+            'status': 'success',
+            'broadcasted_to': connections_count,
+            'notification': notification
+        }
+
+    except Exception as e:
+        print(f"❌ Notification broadcast failed: {e}")
+        # Don't raise error - notification is optional
+        return {
+            'status': 'failed',
+            'error': str(e),
+            'message': 'Notification failed but predictions were saved successfully'
+        }

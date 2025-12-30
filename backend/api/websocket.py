@@ -54,7 +54,7 @@ async def websocket_comments(websocket: WebSocket):
 
     try:
         # Stream comments to this client
-        async for comment in comment_service.stream_comments(interval=2.0):
+        async for comment in comment_service.stream_comments(interval=1.0):
             # Save to MongoDB WITHOUT labels (to be processed by Airflow)
             if mongo_client is not None:
                 try:
@@ -98,6 +98,7 @@ async def websocket_comments(websocket: WebSocket):
 async def websocket_analytics(websocket: WebSocket):
     """WebSocket endpoint for streaming analytics updates"""
     await websocket.accept()
+    active_connections.append(websocket)  # Add to active connections for notifications
 
     try:
         while True:
@@ -110,8 +111,11 @@ async def websocket_analytics(websocket: WebSocket):
             await asyncio.sleep(5)
 
     except WebSocketDisconnect:
+        active_connections.remove(websocket)  # Remove on disconnect
         print("Analytics client disconnected")
     except Exception as e:
+        if websocket in active_connections:
+            active_connections.remove(websocket)
         print(f"Analytics WebSocket error: {e}")
 
 
@@ -120,5 +124,11 @@ async def broadcast_message(message: dict):
     for connection in active_connections:
         try:
             await connection.send_json(message)
-        except:
+        except Exception as e:
+            print(f"Failed to send to client: {e}")
             pass
+
+
+def get_active_connections():
+    """Get list of active WebSocket connections"""
+    return active_connections
