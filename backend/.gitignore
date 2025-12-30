@@ -32,4 +32,4 @@ Thumbs.db
 
 # Model weight
 *.pt
-models/checkpoints/latest_checkpoint.pth
+models/checkpoints/*.pth

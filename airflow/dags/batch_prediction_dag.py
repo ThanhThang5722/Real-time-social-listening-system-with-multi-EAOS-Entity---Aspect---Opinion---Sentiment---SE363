@@ -64,16 +64,21 @@ def fetch_unlabeled_comments(**context):
     db = client['tv_analytics']
     collection = db['comments']
 
-    # Query unlabeled comments ONLY
+    # Query unlabeled comments ONLY (exclude already attempted comments with predicted_at)
     comments = list(collection.find(
         {
-            '$or': [
-                {'labels': {'$exists': False}},
-                {'labels': {'$size': 0}}
+            '$and': [
+                {
+                    '$or': [
+                        {'labels': {'$exists': False}},
+                        {'labels': {'$size': 0}}
+                    ]
+                },
+                {'predicted_at': {'$exists': False}}  # Exclude previously attempted comments
             ]
         },
         {'_id': 1, 'text': 1}
-    ).limit(5))  # Process 5 comments per run (every 1 min = ~300/hour) - uses direct inference
+    ).sort('created_at', -1).limit(5))  # Process 5 comments per run (every 1 min = ~300/hour) - uses direct inference, sorted by creation time (NEWEST first for testing)
 
     print(f"✅ Found {len(comments)} unlabeled comments")
 
@@ -214,8 +219,13 @@ def save_predictions_to_mongodb(**context):
         if not labels or len(labels) == 0:
             empty_prediction_count += 1
             print(f"⚠️  Empty prediction for comment {comment_id}: {pred.get('text', 'N/A')[:50]}...")
-            # Still save empty predictions to mark as processed
-            labels = []
+            # Mark as attempted with timestamp to avoid re-processing
+            print(f"   ⏭️  Marking as attempted (empty prediction)")
+            collection.update_one(
+                {'_id': ObjectId(comment_id)},
+                {'$set': {'predicted_at': datetime.now(), 'labels': []}}
+            )
+            continue
 
         # Convert labels format
         formatted_labels = []
@@ -246,7 +256,58 @@ def save_predictions_to_mongodb(**context):
     if empty_prediction_count > 0:
         print(f"⚠️  {empty_prediction_count} comments had empty predictions (low confidence or no EAOS found)")
 
+    # Push comment IDs to XCom for notification
+    context['task_instance'].xcom_push(key='updated_comment_ids', value=[pred['id'] for pred in predictions])
+
     return updated_count
+
+
+def notify_backend_websocket(**context):
+    """
+    Notify Backend to broadcast WebSocket message about new predictions
+
+    Calls Backend API endpoint to trigger real-time notification
+    to all connected WebSocket clients
+    """
+    import httpx
+
+    updated_count = context['task_instance'].xcom_pull(task_ids='save_predictions')
+    comment_ids = context['task_instance'].xcom_pull(task_ids='save_predictions', key='updated_comment_ids')
+
+    if not updated_count or updated_count == 0:
+        print("⏭️  No updates to notify")
+        return False
+
+    print(f"📢 Notifying Backend about {updated_count} new predictions...")
+
+    # Backend URL
+    backend_url = os.getenv('BACKEND_URL', 'http://host.docker.internal:8000')
+    notify_endpoint = f"{backend_url}/api/notify/predictions"
+
+    print(f"   Calling: {notify_endpoint}")
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.post(
+                notify_endpoint,
+                json={'comment_ids': comment_ids or []}
+            )
+
+            print(f"   Response status: {response.status_code}")
+
+            if response.status_code == 200:
+                result = response.json()
+                broadcasted_to = result.get('broadcasted_to', 0)
+                print(f"✅ Notified {broadcasted_to} WebSocket clients")
+                return True
+            else:
+                print(f"⚠️  Notification failed with status {response.status_code}")
+                return False
+
+    except Exception as e:
+        print(f"⚠️  Failed to notify Backend: {e}")
+        # Don't fail the task - notification is optional
+        return False
 
 
 def generate_analytics_report(**context):
@@ -347,6 +408,12 @@ save_predictions = PythonOperator(
     dag=dag,
 )
 
+notify_websocket = PythonOperator(
+    task_id='notify_websocket',
+    python_callable=notify_backend_websocket,
+    dag=dag,
+)
+
 generate_report = PythonOperator(
     task_id='generate_report',
     python_callable=generate_analytics_report,
@@ -360,4 +427,4 @@ cleanup = PythonOperator(
 )
 
 # Define task flow
-fetch_comments >> predict_batch >> save_predictions >> generate_report >> cleanup
+fetch_comments >> predict_batch >> save_predictions >> notify_websocket >> generate_report >> cleanup

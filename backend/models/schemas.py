@@ -48,6 +48,11 @@ class AnalyticsSummary(BaseModel):
     recent_comments: List[Comment]
 
 
+class NotifyRequest(BaseModel):
+    """Notification request for new predictions"""
+    comment_ids: Optional[List[str]] = None
+
+
 class PredictRequest(BaseModel):
     """Request for single comment prediction"""
     text: str
